@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::{egui, epaint::Color32};
 use serialport::{FlowControl, SerialPort, SerialPortInfo};
@@ -24,6 +24,10 @@ enum State {
         value_buf_idx: usize,
         read_buf: [u8; 128],
         read_buf_idx: usize,
+
+        samples_read_this_second: usize,
+        samples_read_prev_second: usize,
+        next_second: Instant,
     },
 }
 
@@ -43,6 +47,10 @@ impl State {
             value_buf_idx: 0,
             read_buf: [0; 128],
             read_buf_idx: 0,
+
+            samples_read_prev_second: 0,
+            samples_read_this_second: 0,
+            next_second: Instant::now(),
         }
     }
 }
@@ -117,11 +125,12 @@ impl eframe::App for MyEguiApp {
                 read_buf_idx,
                 value_buf,
                 value_buf_idx,
+
+                samples_read_this_second,
+                samples_read_prev_second,
+                next_second,
             } => {
                 let bytes_read = port.read(&mut read_buf[*read_buf_idx..]).unwrap();
-                if bytes_read > 0 {
-                    println!("read {bytes_read}");
-                }
                 *read_buf_idx += bytes_read;
 
                 let serial_read = &read_buf[..*read_buf_idx];
@@ -143,15 +152,16 @@ impl eframe::App for MyEguiApp {
                             *read_buf_idx -= value_serial_length;
                             value_buf[*value_buf_idx] = current_val as f32;
 
+                            *samples_read_this_second += 1;
                             *value_buf_idx += 1;
                             *value_buf_idx %= value_buf.len();
-                            println!("{}", current_val);
 
                             current_digit = 0;
                             current_val = 0;
                         }
                         '\0' => {
                             total_rotation += 1;
+                            eprintln!("Got zero")
                         }
                         byte => {
                             eprintln!("Got unknown byte '{byte:?}'");
@@ -166,6 +176,13 @@ impl eframe::App for MyEguiApp {
 
                 read_buf.rotate_left(total_rotation);
 
+                let instant = Instant::now();
+                if instant >= *next_second {
+                    *samples_read_prev_second = *samples_read_this_second;
+                    *samples_read_this_second = 0;
+                    *next_second = instant + Duration::from_secs(1);
+                }
+
                 ui.label(format!(
                     "Read buffer: {}/{} bytes used",
                     read_buf_idx,
@@ -173,6 +190,10 @@ impl eframe::App for MyEguiApp {
                 ));
 
                 ui.label(format!("{:?}", read_buf));
+                ui.label(format!(
+                    "Sampling frequency: {}Hz",
+                    samples_read_prev_second
+                ));
 
                 egui::plot::Plot::new("plot")
                     .include_y(1023.)
