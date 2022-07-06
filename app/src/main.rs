@@ -22,8 +22,6 @@ enum State {
         port: Box<dyn SerialPort>,
         value_buf: Vec<f32>,
         value_buf_idx: usize,
-        read_buf: [u8; 128],
-        read_buf_idx: usize,
 
         samples_read_this_second: usize,
         samples_read_prev_second: usize,
@@ -45,8 +43,6 @@ impl State {
             port,
             value_buf: vec![0.; 128],
             value_buf_idx: 0,
-            read_buf: [0; 128],
-            read_buf_idx: 0,
 
             samples_read_prev_second: 0,
             samples_read_this_second: 0,
@@ -102,9 +98,8 @@ impl eframe::App for MyEguiApp {
                             let port = serialport::new(&ports[*selected].port_name, 9600)
                                 .data_bits(serialport::DataBits::Eight)
                                 .flow_control(serialport::FlowControl::None)
-                                .parity(serialport::Parity::None)
-                                .stop_bits(serialport::StopBits::One)
-                                .timeout(Duration::from_secs(10));
+                                .parity(serialport::Parity::Even)
+                                .stop_bits(serialport::StopBits::One);
                             match port.open() {
                                 Ok(port) => self.state = State::new_reading(port),
                                 Err(err) => *creation_error = Some(err),
@@ -121,8 +116,7 @@ impl eframe::App for MyEguiApp {
             }
             State::Reading {
                 port,
-                read_buf,
-                read_buf_idx,
+
                 value_buf,
                 value_buf_idx,
 
@@ -130,51 +124,17 @@ impl eframe::App for MyEguiApp {
                 samples_read_prev_second,
                 next_second,
             } => {
-                let bytes_read = port.read(&mut read_buf[*read_buf_idx..]).unwrap();
-                *read_buf_idx += bytes_read;
+                let mut bytes = [0u8; 2];
 
-                let serial_read = &read_buf[..*read_buf_idx];
-
-                let mut current_val: usize = 0;
-                let mut current_digit = 0;
-                let mut total_rotation = 0;
-                for byte in serial_read.iter().copied() {
-                    match byte as char {
-                        '0'..='9' => {
-                            let value = byte - '0' as u8;
-                            current_val += value as usize * 10usize.pow(current_digit);
-                            current_digit += 1;
-                        }
-                        ',' => {
-                            // Value is encoded as simple decimal, length is log2 of the value + comma character
-                            let value_serial_length = current_digit as usize + 1;
-                            total_rotation += value_serial_length;
-                            *read_buf_idx -= value_serial_length;
-                            value_buf[*value_buf_idx] = current_val as f32;
-
-                            *samples_read_this_second += 1;
-                            *value_buf_idx += 1;
-                            *value_buf_idx %= value_buf.len();
-
-                            current_digit = 0;
-                            current_val = 0;
-                        }
-                        '\0' => {
-                            total_rotation += 1;
-                            eprintln!("Got zero")
-                        }
-                        byte => {
-                            eprintln!("Got unknown byte '{byte:?}'");
-                            total_rotation += 1;
-                        }
+                while let Ok(()) = port.read_exact(&mut bytes) {
+                    let value = u16::from_le_bytes(bytes);
+                    if value < 1024 {
+                        value_buf[*value_buf_idx] = value as f32 * 5. / 1023.;
+                        *value_buf_idx += 1;
+                        *value_buf_idx %= value_buf.len();
+                        *samples_read_this_second += 1;
                     }
                 }
-
-                if *read_buf_idx == read_buf.len() {
-                    *read_buf_idx = 0;
-                }
-
-                read_buf.rotate_left(total_rotation);
 
                 let instant = Instant::now();
                 if instant >= *next_second {
@@ -184,19 +144,13 @@ impl eframe::App for MyEguiApp {
                 }
 
                 ui.label(format!(
-                    "Read buffer: {}/{} bytes used",
-                    read_buf_idx,
-                    read_buf.len()
-                ));
-
-                ui.label(format!("{:?}", read_buf));
-                ui.label(format!(
                     "Sampling frequency: {}Hz",
                     samples_read_prev_second
                 ));
 
                 egui::plot::Plot::new("plot")
-                    .include_y(1023.)
+                    .include_y(5.)
+                    .include_y(0.)
                     .show(ui, |plot| {
                         plot.line(egui::plot::Line::new(egui::plot::Values::from_ys_f32(
                             &value_buf,
